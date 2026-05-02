@@ -4,7 +4,9 @@ import * as querystring from "querystring";
 import { Buffer } from "buffer";
 import {
     Device,
+    DeviceBasicInfo,
     EnergyUseData,
+    GetDeviceBasicInfoResponseData,
     GetDevicesResponseData,
     GetEnergyUseDataResponseData,
     GraphQLResponse,
@@ -17,9 +19,14 @@ import {
 import { AOSmithInvalidCredentialsError, AOSmithInvalidParametersError, AOSmithUnknownError } from "./errors.js";
 
 const gotClient = got.extend({
-    prefixUrl: "https://r2.wh8.co/",
+    prefixUrl: "https://r1.wh8.co/",
     method: "POST",
     responseType: "json",
+    headers: {
+        brand: "icomm",
+        version: "14.0.0",
+        "User-Agent": "okhttp/4.12.0",
+    },
 });
 
 const DEVICES_GRAPHQL_QUERY = `
@@ -46,6 +53,12 @@ query devices($forceUpdate: Boolean, $junctionIds: [String]) {
                 controls
             }
             isOnline
+            ... on HeatPump {
+                firmwareVersion
+                hotWaterStatus
+                mode
+                modePending
+            }
             ... on NextGenHeatPump {
                 firmwareVersion
                 hotWaterStatus
@@ -54,12 +67,50 @@ query devices($forceUpdate: Boolean, $junctionIds: [String]) {
                 vacationModeRemainingDays
                 electricModeRemainingDays
             }
+            ... on RE3Connected {
+                firmwareVersion
+                hotWaterStatus
+                mode
+                modePending
+                vacationModeRemainingDays
+            }
+            ... on RE3Premium {
+                firmwareVersion
+                hotWaterStatus
+                mode
+                modePending
+                vacationModeRemainingDays
+                guestModeRemainingDays
+                hotWaterPlusLevel
+            }
+            ... on Baja {
+                firmwareVersion
+                hotWaterStatus
+                mode
+                modePending
+                vacationModeRemainingDays
+            }
         }
     }
 }
 `;
 
+const DEVICES_BASIC_INFO_GRAPHQL_QUERY = `
+query devices($forceUpdate: Boolean, $junctionIds: [String]) {
+    devices(forceUpdate: $forceUpdate, junctionIds: $junctionIds) {
+        brand
+        model
+        deviceType
+        dsn
+        junctionId
+        name
+        serial
+    }
+}
+`;
+
 const MAX_RETRIES = 2;
+const COMPATIBLE_DEVICE_TYPES = ["HeatPump", "NextGenHeatPump", "RE3Connected", "RE3Premium", "Baja"];
 
 export class AOSmithAPIClient {
     private email: string;
@@ -156,11 +207,15 @@ export class AOSmithAPIClient {
     }
 
     async getDevices(): Promise<Device[]> {
+        const devices = await this.getAllDevices();
+
+        return devices.filter((device) => COMPATIBLE_DEVICE_TYPES.includes(device.data.__typename));
+    }
+
+    async getAllDevices(): Promise<Device[]> {
         const data = await this.sendGraphQLQuery<GetDevicesResponseData>(DEVICES_GRAPHQL_QUERY, { forceUpdate: true });
 
-        const nextGenHeatPumpDevices = data.devices.filter((device) => device.data.__typename === "NextGenHeatPump");
-
-        return nextGenHeatPumpDevices;
+        return data.devices;
     }
 
     private async getDeviceByJunctionId(junctionId: string): Promise<Device> {
@@ -172,10 +227,25 @@ export class AOSmithAPIClient {
         return device;
     }
 
+    private async getDeviceBasicInfoByJunctionId(junctionId: string): Promise<DeviceBasicInfo> {
+        const data = await this.sendGraphQLQuery<GetDeviceBasicInfoResponseData>(DEVICES_BASIC_INFO_GRAPHQL_QUERY, {
+            forceUpdate: true,
+            junctionIds: [junctionId],
+        });
+
+        const device = data.devices.find((candidate) => candidate.junctionId === junctionId);
+        if (!device) throw new AOSmithUnknownError("Device not found");
+
+        return device;
+    }
+
     async updateSetpoint(junctionId: string, setpoint: number): Promise<void> {
         if (setpoint < 95) throw new AOSmithInvalidParametersError("Setpoint is below the minimum");
 
         const device = await this.getDeviceByJunctionId(junctionId);
+
+        if (device.data.temperatureSetpointMaximum === null)
+            throw new AOSmithInvalidParametersError("Setpoint is not supported for this device");
 
         if (setpoint > device.data.temperatureSetpointMaximum)
             throw new AOSmithInvalidParametersError("Setpoint is above the maximum");
@@ -231,8 +301,22 @@ export class AOSmithAPIClient {
     }
 
     async getEnergyUseData(junctionId: string): Promise<EnergyUseData> {
-        const device = await this.getDeviceByJunctionId(junctionId);
+        const device = await this.getDeviceBasicInfoByJunctionId(junctionId);
 
-        return await this.getEnergyUseDataByDSN(device.dsn, device.deviceType);
+        const deviceTypesToTry = [
+            device.deviceType,
+            device.model?.startsWith("HPTS-") ? "NEXT_GEN_HEAT_PUMP" : undefined,
+        ].filter((deviceType): deviceType is string => typeof deviceType === "string");
+
+        let lastError: unknown;
+        for (const deviceType of [...new Set(deviceTypesToTry)]) {
+            try {
+                return await this.getEnergyUseDataByDSN(device.dsn, deviceType);
+            } catch (error) {
+                lastError = error;
+            }
+        }
+
+        throw lastError;
     }
 }

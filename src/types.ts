@@ -47,6 +47,10 @@ export interface GetDevicesResponseData {
     devices: Device[];
 }
 
+export interface GetDeviceBasicInfoResponseData {
+    devices: DeviceBasicInfo[];
+}
+
 export interface Device {
     brand: string;
     model: string;
@@ -60,24 +64,36 @@ export interface Device {
     };
     data: {
         __typename: string;
-        temperatureSetpoint: number;
+        temperatureSetpoint: number | null;
         temperatureSetpointPending: boolean;
-        temperatureSetpointPrevious: number;
-        temperatureSetpointMaximum: number;
+        temperatureSetpointPrevious: number | null;
+        temperatureSetpointMaximum: number | null;
         modes: Mode[];
         isOnline: boolean;
 
-        // specific to __typename === "NextGenHeatPump"
-        firmwareVersion: string;
-        hotWaterStatus: "LOW" | "MEDIUM" | "HIGH";
-        mode: string;
-        modePending: boolean;
-        vacationModeRemainingDays: number;
-        electricModeRemainingDays: number;
+        // Specific to known heater types.
+        firmwareVersion?: string;
+        hotWaterStatus?: "LOW" | "MEDIUM" | "HIGH" | number;
+        mode?: string;
+        modePending?: boolean;
+        vacationModeRemainingDays?: number;
+        electricModeRemainingDays?: number;
+        guestModeRemainingDays?: number;
+        hotWaterPlusLevel?: string;
     };
 }
 
-interface Mode {
+export interface DeviceBasicInfo {
+    brand: string;
+    model: string;
+    deviceType: string;
+    dsn: string;
+    junctionId: string;
+    name: string;
+    serial: string;
+}
+
+export interface Mode {
     mode: string;
     controls: string | null;
 }
